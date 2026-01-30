@@ -6,6 +6,7 @@ Handles P2P connection between PC game and mobile controller using aiortc.
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from aiohttp import web, WSMsgType
@@ -14,6 +15,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Port from environment variable (Render) or default
+PORT = int(os.environ.get("PORT", 8080))
 
 # Store for peer connections and signaling
 pcs = set()
@@ -112,10 +116,10 @@ async def web_server():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    logger.info("WebRTC server running on http://0.0.0.0:8080")
+    logger.info(f"WebRTC server running on http://0.0.0.0:{PORT}")
 
     try:
         await asyncio.Event().wait()

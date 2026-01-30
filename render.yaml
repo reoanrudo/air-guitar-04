@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: air-guitar-webrtc
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python webrtc_server.py
+
+    # Environment variables
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      - key: PORT
+        value: 8080
+
+    # Health check
+    healthCheckPath: /
+
+    # Auto-deploy on git push
+    autoDeploy: true
+
+    # Scaling
+    numInstances: 1
+
+    # Disk
+    disk:
+      name: data
+      mountPath: /opt/render/project/data
+      sizeGB: 1

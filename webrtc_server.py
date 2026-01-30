@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Port from environment variable (Render) or default
 PORT = int(os.environ.get("PORT", 8080))
+logger.info(f"Starting server on PORT: {PORT}")
 
 # Store for peer connections and signaling
 pcs = set()

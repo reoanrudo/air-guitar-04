@@ -4,15 +4,19 @@ Integrated Pygame game + WebRTC server
 """
 
 import asyncio
+import io
 import json
 import logging
+import os
 import random
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pygame
+import qrcode
 from aiohttp import web as aio_web
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
@@ -48,6 +52,16 @@ COLOR_TEXT_SLATE = (100, 116, 139)
 # Guitar strings
 STRING_NAMES = ['E', 'A', 'D', 'G', 'B', 'E']
 
+# Chord patterns (fret for each string: E A D G B E)
+CHORDS = {
+    'C': [0, 3, 2, 0, 1, 0],   # x32010
+    'G': [3, 2, 0, 0, 0, 3],   # 320003
+    'D': [2, 3, 2, 0, 0, 0],   # xx0232
+    'Am': [0, 0, 2, 2, 0, 0],  # x02210
+    'Em': [0, 2, 2, 0, 0, 0],  # 022000
+    'F': [1, 3, 3, 2, 1, 1],   # 133211
+}
+
 
 # Song data structure
 class Song:
@@ -56,7 +70,7 @@ class Song:
     def __init__(self, name, bpm, notes, duration=None):
         self.name = name
         self.bpm = bpm
-        self.notes = notes  # List of (time_ms, fret) tuples
+        self.notes = notes  # List of (time_ms, chord) tuples
         self.duration = duration or (notes[-1][0] + 3000 if notes else 60000)
         self.note_index = 0
         self.start_time = None
@@ -76,28 +90,34 @@ class Song:
         self.start_time = None
 
 
-# Simple beginner songs
+# Simple beginner songs (chord-based)
 BEGINNER_SONGS = {
     'twinkle': Song(
         "Twinkle Twinkle Little Star",
         bpm=100,
         notes=[
-            (0, 0), (1000, 0), (2000, 3), (3000, 3), (4000, 5), (5000, 5), (6000, 3),
-            (7000, 0), (8000, 0), (9000, 3), (10000, 3), (11000, 5), (12000, 5), (13000, 7),
-            (14000, 5), (15000, 5), (16000, 3), (17000, 3), (18000, 0), (19000, 0), (20000, 0),
-            # Repeat
-            (21000, 0), (22000, 0), (23000, 3), (24000, 3), (25000, 5), (26000, 5), (27000, 3),
+            (0, 'C'), (2000, 'C'), (4000, 'G'), (6000, 'G'), (8000, 'Am'), (10000, 'Am'), (12000, 'G'),
+            (14000, 'F'), (16000, 'F'), (18000, 'C'), (20000, 'C'), (22000, 'G'), (24000, 'G'),
+            (26000, 'Am'), (28000, 'F'), (30000, 'F'), (32000, 'C'),
         ],
-        duration=30000  # 30 seconds
+        duration=35000  # 35 seconds
     ),
     'happy_birthday': Song(
         "Happy Birthday",
         bpm=95,
         notes=[
-            (0, 0), (500, 0), (1000, 2), (1500, 0), (2000, 5), (2500, 4),
-            (3000, 0), (3500, 0), (4000, 2), (4500, 0), (5000, 7), (5500, 5),
-            (6000, 0), (6500, 0), (7000, 9), (7500, 5), (8000, 4), (8500, 2), (9000, 3),
-            (9500, 1), (10000, 1), (10500, 0), (11000, 0), (11500, 7), (12000, 5),
+            (0, 'C'), (1000, 'C'), (2000, 'D'), (3000, 'C'), (4000, 'F'), (5000, 'E'),
+            (6000, 'C'), (7000, 'C'), (8000, 'D'), (9000, 'C'), (10000, 'G'), (11000, 'F'),
+            (12000, 'C'), (13000, 'C'), (14000, 'F'), (15000, 'E'), (16000, 'D'),
+        ],
+        duration=20000
+    ),
+    'wild_thing': Song(
+        "Wild Thing",
+        bpm=110,
+        notes=[
+            (0, 'A'), (1500, 'A'), (3000, 'D'), (4500, 'D'), (6000, 'E'), (7500, 'E'), (9000, 'D'),
+            (12000, 'A'), (13500, 'A'), (15000, 'D'), (16500, 'D'), (18000, 'E'), (19500, 'E'),
         ],
         duration=25000
     ),
@@ -139,9 +159,24 @@ class WebRTCServer:
             def on_message(message):
                 try:
                     data = json.loads(message)
-                    if data.get("type") == "FRET_UPDATE":
+                    msg_type = data.get("type")
+
+                    if msg_type == "FRET_UPDATE":
                         self.game_state.fret_states = data.get("payload", [0, 0, 0, 0, 0, 0])
                         logger.info(f"FRET update: {self.game_state.fret_states}")
+                        # Send acknowledgment
+                        channel.send(json.dumps({"type": "ACK", "timestamp": data.get("timestamp", 0)}))
+
+                    elif msg_type == "PING":
+                        # Respond with PONG
+                        import time
+                        pong_response = json.dumps({
+                            "type": "PONG",
+                            "originalTimestamp": data.get("timestamp", int(time.time() * 1000)),
+                            "serverTimestamp": int(time.time() * 1000)
+                        })
+                        channel.send(pong_response)
+
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON: {message}")
 
@@ -164,10 +199,24 @@ class WebRTCServer:
         })
 
     async def mobile_handler(self, request):
-        """Serve mobile controller page."""
+        """Serve mobile controller page with PC URL."""
         html_path = Path(__file__).parent / "templates" / "mobile_webrtc.html"
         if html_path.exists():
-            return aio_web.Response(text=html_path.read_text(), content_type="text/html")
+            html_content = html_path.read_text()
+
+            # Get PC URL from tunnel_urls.txt
+            urls_file = Path(__file__).parent / "tunnel_urls.txt"
+            pc_url = "https://packaging-southwest-proper-link.trycloudflare.com"  # fallback
+            if urls_file.exists():
+                content = urls_file.read_text()
+                for line in content.split('\n'):
+                    if line.startswith('TUNNEL_8081='):
+                        pc_url = line.split('=', 1)[1].strip()
+                        break
+
+            logger.info(f"Serving mobile page with PC URL: {pc_url}")
+
+            return aio_web.Response(text=html_content, content_type="text/html")
         return aio_web.Response(text="Not found", status=404)
 
     async def index_handler(self, request):
@@ -259,33 +308,35 @@ class MotionDetector:
 
         # Detect strum by tracking motion center crossing midline
         now = datetime.now().timestamp() * 1000
-        if now - self.last_strum_time > 150:  # Cooldown between strums
-            # Check if there's enough motion
-            if diff_sum > 3000:
+        if now - self.last_strum_time > 200:  # Cooldown between strums
+            # Check if there's enough motion (increased threshold from 3000 to 5000)
+            if diff_sum > 5000:
                 if self.prev_center_y is not None:
                     velocity = center_y - self.prev_center_y
 
-                    # Check which half we're in
-                    current_half = 'upper' if center_y < self.zone_mid_y else 'lower'
+                    # Only trigger if velocity is significant (added check)
+                    if abs(velocity) > 10:
+                        # Check which half we're in
+                        current_half = 'upper' if center_y < self.zone_mid_y else 'lower'
 
-                    # Check if crossed midline
-                    mid_crossed = (self.prev_center_y < self.zone_mid_y and center_y >= self.zone_mid_y) or \
-                                  (self.prev_center_y > self.zone_mid_y and center_y <= self.zone_mid_y)
+                        # Check if crossed midline
+                        mid_crossed = (self.prev_center_y < self.zone_mid_y and center_y >= self.zone_mid_y) or \
+                                      (self.prev_center_y > self.zone_mid_y and center_y <= self.zone_mid_y)
 
-                    if mid_crossed:
-                        # Check if we were waiting for opposite half (prevents double-triggering)
-                        if not self.waiting_for_opposite_half:
-                            # First crossing - valid strum
-                            self.last_strum_time = now
-                            self.last_strum_half = current_half
-                            self.waiting_for_opposite_half = True
-                            return 'down' if velocity > 0 else 'up'
-                        else:
-                            # We were waiting for opposite half - check if we're now in opposite half
-                            expected_half = 'lower' if self.last_strum_half == 'upper' else 'upper'
-                            if current_half == expected_half:
-                                # Successfully moved to opposite half - ready for next strum
-                                self.waiting_for_opposite_half = False
+                        if mid_crossed:
+                            # Check if we were waiting for opposite half (prevents double-triggering)
+                            if not self.waiting_for_opposite_half:
+                                # First crossing - valid strum
+                                self.last_strum_time = now
+                                self.last_strum_half = current_half
+                                self.waiting_for_opposite_half = True
+                                return 'down' if velocity > 0 else 'up'
+                            else:
+                                # We were waiting for opposite half - check if we're now in opposite half
+                                expected_half = 'lower' if self.last_strum_half == 'upper' else 'upper'
+                                if current_half == expected_half:
+                                    # Successfully moved to opposite half - ready for next strum
+                                    self.waiting_for_opposite_half = False
 
             self.prev_center_y = center_y
         else:
@@ -334,80 +385,90 @@ class Particle:
 class Note:
     """Rhythm game note."""
 
-    def __init__(self, fret):
+    def __init__(self, chord):
         self.x = -100
-        self.fret = fret
+        self.chord = chord  # Chord name (e.g., 'C', 'G', 'D', 'Am')
+        self.fret_pattern = CHORDS.get(chord, [0, 0, 0, 0, 0, 0])
         self.hit = False
         self.missed = False
 
 
 class AudioEngine:
-    """Simple audio engine."""
+    """Audio engine for guitar sounds."""
 
-    def __init__(self):
-        try:
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-            self.enabled = True
-        except:
-            logger.warning("Audio init failed, continuing without sound")
-            self.enabled = False
-        # Base frequencies for open strings (E2, A2, D3, G3, B3, E4)
-        self.base_freqs = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
         self.sample_rate = 44100
         self.bgm = None
 
+        # Base frequencies for guitar strings (low E to high E)
+        self.base_freqs = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
+
     def load_bgm(self, song_name):
         """Load BGM MP3 file."""
-        if not self.enabled:
-            return
-
         bgm_path = Path(__file__).parent / f"{song_name}.mp3"
         if bgm_path.exists():
-            try:
-                self.bgm = pygame.mixer.Sound(str(bgm_path))
-                self.bgm.set_volume(0.5)
-                logger.info(f"BGM loaded: {bgm_path}")
-            except Exception as e:
-                logger.warning(f"Failed to load BGM: {e}")
-                self.bgm = None
-        else:
-            logger.warning(f"BGM file not found: {bgm_path}")
-            self.bgm = None
+            self.bgm = pygame.mixer.Sound(str(bgm_path))
+            self.bgm.set_volume(0.5)
 
     def play_bgm(self):
-        """Play BGM."""
-        if self.bgm and self.enabled:
-            self.bgm.play(loops=-1)  # Loop indefinitely
+        """Play BGM in loop."""
+        if self.bgm:
+            self.bgm.play(loops=-1)
 
     def stop_bgm(self):
         """Stop BGM."""
-        if self.bgm and self.enabled:
+        if self.bgm:
             self.bgm.stop()
 
-    def generate_note_sound(self, freq):
-        """Generate a guitar-like note sound for given frequency."""
-        duration = 0.6
+    def generate_note_sound(self, freq, duration=0.5):
+        """Generate realistic guitar-like sound using FM synthesis."""
         t = np.linspace(0, duration, int(self.sample_rate * duration), False)
 
-        # Guitar-like tone with harmonics
-        wave = (0.5 * np.sin(2 * np.pi * freq * t) +
-               0.25 * np.sin(2 * np.pi * freq * 2 * t) +
-               0.125 * np.sin(2 * np.pi * freq * 3 * t) +
-               0.06 * np.sin(2 * np.pi * freq * 4 * t))
+        # FM Synthesis for richer guitar tone
+        # Carrier wave
+        carrier = np.sin(2 * np.pi * freq * t)
 
-        # ADSR envelope
-        attack = int(0.01 * self.sample_rate)
-        decay = int(0.1 * self.sample_rate)
-        sustain = int(0.3 * self.sample_rate)
-        release = int(0.19 * self.sample_rate)
+        # Modulator waves for harmonics (guitar has many harmonics)
+        modulator1 = np.sin(2 * np.pi * freq * 2 * t)
+        modulator2 = np.sin(2 * np.pi * freq * 3 * t)
+        modulator3 = np.sin(2 * np.pi * freq * 4 * t)
+        modulator4 = np.sin(2 * np.pi * freq * 5 * t)
+
+        # Combine waves with harmonic ratios (realistic guitar spectrum)
+        wave = (carrier * 0.6 +
+                modulator1 * 0.35 +
+                modulator2 * 0.20 +
+                modulator3 * 0.12 +
+                modulator4 * 0.08)
+
+        # Add slight vibrato (guitar natural string vibration)
+        vibrato = np.sin(2 * np.pi * 5 * t) * 0.003  # 5Hz vibrato
+        wave = wave * (1 + vibrato)
+
+        # Add brightness (high frequency content)
+        brightness = np.sin(2 * np.pi * freq * 8 * t) * 0.03
+        wave += brightness
+
+        # ADSR envelope (sharper attack for guitar pluck)
+        attack = int(0.005 * self.sample_rate)   # Very fast attack (pluck)
+        decay = int(0.08 * self.sample_rate)     # Quick decay
+        sustain = int(0.25 * self.sample_rate)   # Sustain level
+        release = int(0.165 * self.sample_rate)  # Natural decay
 
         envelope = np.ones_like(t)
-        envelope[:attack] = np.linspace(0, 1, attack)
-        envelope[attack:attack+decay] = np.linspace(1, 0.7, decay)
-        envelope[attack+decay:attack+decay+sustain] = 0.7
-        envelope[attack+decay+sustain:] = np.linspace(0.7, 0, release)
+        envelope[:attack] = np.linspace(0, 1, attack)  # Fast attack
+        envelope[attack:attack+decay] = np.linspace(1, 0.5, decay)  # Decay to sustain
+        envelope[attack+decay:attack+decay+sustain] = np.linspace(0.5, 0.3, sustain)  # Sustain decay
+        envelope[attack+decay+sustain:] = np.linspace(0.3, 0, release)  # Release
 
-        wave = wave * envelope * 0.4
+        wave = wave * envelope * 0.35  # Overall volume
+
+        # Soft clipping (slight distortion for warmth)
+        wave = np.tanh(wave * 2) * 0.5
+
+        # Convert to 16-bit
         wave = (wave * 32767).astype(np.int16)
         stereo = np.column_stack((wave, wave))
 
@@ -477,6 +538,42 @@ class Game:
         self.hit_rating_color = COLOR_TEXT_WHITE
         self.hit_rating_time = 0
 
+        # Generate QR code for mobile controller
+        self.mobile_url = self._get_mobile_url()
+        self.qr_surface = self._generate_qr_code(self.mobile_url)
+
+    def _get_mobile_url(self):
+        """Get mobile controller URL from environment variable or default."""
+        # Check for Render URL from environment variable
+        render_url = os.environ.get("RENDER_WEBRTC_URL")
+        if render_url:
+            logger.info(f"Using Render URL: {render_url}/mobile")
+            return f"{render_url}/mobile"
+
+        # Default to Render deployment (auto-configured)
+        render_url = "https://air-guitar-webrtc.onrender.com"
+        logger.info(f"Using default Render URL: {render_url}/mobile")
+        return f"{render_url}/mobile"
+
+    def _generate_qr_code(self, url: str, size: int = 200) -> pygame.Surface:
+        """Generate QR code as Pygame surface."""
+        qr = qrcode.QRCode(version=1, box_size=10, border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+
+        # Create PIL image
+        img = qr.make_image(fill_color="white", back_color="black")
+
+        # Convert to pygame surface
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+
+        qr_surface = pygame.image.load(img_bytes)
+        qr_surface = pygame.transform.scale(qr_surface, (size, size))
+
+        return qr_surface
+
     def start_song(self):
         """Start the selected song."""
         self.current_song = self.available_songs[self.selected_song_name]
@@ -492,7 +589,8 @@ class Game:
             # Random mode when no song
             now = pygame.time.get_ticks()
             if now - self.last_note_time > SPAWN_INTERVAL:
-                self.notes.append(Note(random.choice([0, 3, 5, 7, 10, 12])))
+                chord = random.choice(list(CHORDS.keys()))
+                self.notes.append(Note(chord))
                 self.last_note_time = now
             return
 
@@ -500,10 +598,10 @@ class Game:
         current_time = pygame.time.get_ticks()
         song_time = current_time - self.song_start_time
 
-        # Get notes that should spawn now
-        frets = self.current_song.get_notes_at_time(song_time)
-        for fret in frets:
-            self.notes.append(Note(fret))
+        # Get chords that should spawn now
+        chords = self.current_song.get_notes_at_time(song_time)
+        for chord in chords:
+            self.notes.append(Note(chord))
 
         # Check if song ended
         if song_time > self.current_song.duration:
@@ -576,10 +674,14 @@ class Game:
         for note in self.notes:
             if not note.hit:
                 color = COLOR_NOTE if not note.missed else COLOR_NOTE_MISS
-                rect = pygame.Rect(note.x - 50, center_y - 40, 100, 80)
+                rect = pygame.Rect(note.x - 60, center_y - 50, 120, 100)
                 pygame.draw.rect(self.screen, color, rect, border_radius=15)
-                text = self.font_medium.render(f"F{note.fret}", True, COLOR_TEXT_WHITE)
+                # Draw chord name
+                text = self.font_large.render(note.chord, True, COLOR_TEXT_WHITE)
                 self.screen.blit(text, text.get_rect(center=(note.x, center_y)))
+                # Draw small fret pattern below
+                pattern_text = self.font_small.render(str(note.fret_pattern), True, (200, 200, 200))
+                self.screen.blit(pattern_text, pattern_text.get_rect(center=(note.x, center_y + 30)))
 
     def draw_strings(self):
         """Draw guitar strings."""
@@ -588,7 +690,7 @@ class Game:
         # Draw strum zone indicator
         zone_x, zone_y, zone_w, zone_h = self.motion_detector.get_strum_zone_rect()
         zone_rect = pygame.Rect(zone_x, zone_y, zone_w, zone_h)
-        pygame.draw.rect(self.screen, (30, 41, 59), zone_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (30, 41, 59, zone_rect), border_radius=10)
         pygame.draw.rect(self.screen, (71, 85, 105), zone_rect, 2, border_radius=10)
 
         # Draw motion visualization
@@ -683,6 +785,19 @@ class Game:
             song_text = self.font_medium.render(f"♪ {song.name} ♪", True, COLOR_PERFECT)
             self.screen.blit(song_text, song_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 10)))
 
+        # QR Code (positioned at top right)
+        qr_x = WINDOW_WIDTH - 220
+        qr_y = 20
+        self.screen.blit(self.qr_surface, (qr_x, qr_y))
+
+        # QR Label
+        qr_label = self.font_small.render("Scan for Mobile Controller", True, COLOR_TEXT_WHITE)
+        self.screen.blit(qr_label, qr_label.get_rect(center=(qr_x + 100, qr_y + 220)))
+
+        # URL text
+        url_text = self.font_small.render(self.mobile_url[:35] + "...", True, COLOR_TEXT_SLATE)
+        self.screen.blit(url_text, url_text.get_rect(center=(qr_x + 100, qr_y + 250)))
+
         prompt = self.font_medium.render("Press SPACE to Start | ESC to Quit", True, COLOR_TEXT_WHITE)
         self.screen.blit(prompt, prompt.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 60)))
 
@@ -743,25 +858,43 @@ class Game:
         pygame.quit()
 
 
-async def run_game():
-    """Run game in async context."""
+def run_webrtc_server_sync():
+    """Run WebRTC server in a separate thread."""
+    async def start_and_run():
+        webrtc_server = WebRTCServer(game_state)
+        await webrtc_server.start()
+        # Keep server running
+        while True:
+            await asyncio.sleep(1)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def run_server():
+        loop.run_until_complete(start_and_run())
+
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+    logger.info("WebRTC server started in background thread")
+
+
+def run_game():
+    """Run game."""
     print("Starting Air Guitar Pro...")
-    webrtc_server = WebRTCServer(game_state)
-    await webrtc_server.start()
+    run_webrtc_server_sync()
     print("WebRTC server started")
 
     try:
         game = Game()
         game.run()
-    finally:
-        await webrtc_server.stop()
-        logger.info("Server stopped")
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
 
 
 def main():
     """Entry point."""
     try:
-        asyncio.run(run_game())
+        run_game()
     except KeyboardInterrupt:
         logger.info("Shutting down...")
 

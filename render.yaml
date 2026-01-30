@@ -10,7 +10,7 @@ services:
     # Environment variables
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13.0
+        value: 3.11.0
       - key: PORT
         value: 8080
 
@@ -22,9 +22,3 @@ services:
 
     # Scaling
     numInstances: 1
-
-    # Disk
-    disk:
-      name: data
-      mountPath: /opt/render/project/data
-      sizeGB: 1

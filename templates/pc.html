@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air Guitar Pro - PC Player</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        .loading-spinner {
+            width: 80px;
+            height: 80px;
+            border: 8px solid #f97316;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        .hit-rating {
+            font-size: 12rem;
+            font-weight: 900;
+            font-style: italic;
+            position: absolute;
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 40;
+        }
+        .hit-rating.ping {
+            animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="fixed inset-0 w-full h-full bg-slate-950 overflow-hidden select-none">
+        <!-- Score Display -->
+        <div class="absolute top-10 left-12 z-30 pointer-events-none flex flex-col items-start">
+            <span class="text-xs font-black text-slate-500 tracking-[0.8em] uppercase mb-1">Score</span>
+            <span id="scoreDisplay" class="text-8xl font-mono font-black text-white italic tracking-tighter" style="filter: drop-shadow(0 0 30px rgba(255,255,255,0.2));">
+                0
+            </span>
+        </div>
+
+        <!-- Combo Display -->
+        <div class="absolute bottom-40 right-14 z-30 pointer-events-none">
+            <div id="comboContainer" class="flex flex-col items-end" style="display: none;">
+                <span id="comboDisplay" class="text-14rem font-black italic text-orange-500 leading-none" style="filter: drop-shadow(0 0 80px rgba(249,115,22,0.7)); font-size: 10rem;">
+                    0
+                </span>
+                <span class="text-4xl font-black italic text-white tracking-[0.4em] -mt-10 uppercase">Combo!</span>
+            </div>
+        </div>
+
+        <!-- Main Game Area -->
+        <div class="w-full h-full relative flex items-center justify-center">
+            <video id="video" class="hidden" playsinline muted></video>
+            <canvas id="gameCanvas" class="w-full h-full object-cover"></canvas>
+
+            <!-- Hit Rating Display -->
+            <div id="hitRating" class="hit-rating" style="display: none;"></div>
+
+            <!-- Loading Screen -->
+            <div id="loadingScreen" class="absolute inset-0 bg-slate-950 z-50 flex flex-col items-center justify-center text-center">
+                <div class="loading-spinner mb-8"></div>
+                <p class="font-black text-white tracking-[1.5em] text-2xl italic animate-pulse">SETTING UP STAGE...</p>
+            </div>
+
+            <!-- Start Screen -->
+            <div id="startScreen" class="absolute inset-0 bg-slate-950/98 backdrop-blur-3xl z-40 flex items-center justify-center p-6 text-center" style="display: none;">
+                <div class="max-w-4xl bg-white/5 p-20 rounded-[100px] border border-white/10 shadow-2xl">
+                    <h1 class="font-black italic gradient-text mb-8 tracking-tighter leading-none uppercase" style="font-size: 6rem; background: linear-gradient(to bottom right, #fb923c, #dc2626); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+                        Air Guitar<br/>PRO
+                    </h1>
+                    <p class="text-slate-400 mb-14 font-bold text-2xl leading-relaxed px-16">
+                        右側の<span class="text-white italic underline" style="text-decoration-color: #f97316; text-underline-offset: 8px;">腰の高さ</span>で<br/>
+                        指を鋭く振り抜いて演奏しよう！
+                    </p>
+                    <button id="startBtn" class="bg-blue-600 text-white px-40 py-12 rounded-full font-black text-5xl italic hover:scale-110 active:scale-95 transition-all shadow-2xl">
+                        GIG START
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom Status Bar -->
+        <div class="absolute bottom-8 w-full flex items-center justify-between px-16 z-20">
+            <div class="flex items-center gap-8 bg-black/60 px-8 py-4 rounded-full border border-white/10 backdrop-blur-md">
+                <div id="connectionStatus" class="flex items-center gap-4 text-red-500 animate-pulse">
+                    <div id="connectionDot" class="status-dot connecting"></div>
+                    <span class="text-xs font-black uppercase tracking-[0.2em]">Linking...</span>
+                </div>
+                <div class="text-xs font-black text-slate-500 uppercase">Room: {{ room_id }}</div>
+            </div>
+
+            <button id="exitBtn" class="bg-white/5 hover:bg-red-600 text-white px-10 py-3 rounded-full text-xs font-black border border-white/10 transition-all uppercase tracking-widest">
+                Abort
+            </button>
+        </div>
+    </div>
+
+    <!-- TensorFlow.js and HandPose -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.1.0/dist/handpose.min.js"></script>
+    <!-- Tone.js for audio -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/15.1.22/Tone.js"></script>
+    <!-- PeerJS for WebRTC -->
+    <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+
+    <script>
+        const ROOM_ID = '{{ room_id }}';
+
+        // Game constants
+        let CANVAS_W = window.innerWidth;
+        let CANVAS_H = window.innerHeight;
+        const NOTE_SPEED = 16;
+        const HIT_ZONE_X = CANVAS_W - 250;
+        const STRUM_VELOCITY_THRESHOLD = 18;
+        const HIT_WINDOW = 120;
+
+        const STRUM_ZONE = {
+            x: CANVAS_W - 650,
+            y: CANVAS_H * 0.65,
+            w: 600,
+            h: CANVAS_H * 0.3
+        };
+        const STRUM_MID_Y = STRUM_ZONE.y + (STRUM_ZONE.h / 2);
+
+        // Game state
+        let isReady = false;
+        let isAudioStarted = false;
+        let score = 0;
+        let combo = 0;
+        let fretStates = [0, 0, 0, 0, 0, 0];
+        let notes = [];
+        let nextNoteId = 0;
+        let lastNoteSpawnTime = 0;
+        let lastY = null;
+        let isStrumming = false;
+        let lastStrumTime = 0;
+        let particles = [];
+
+        // DOM elements
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const comboDisplay = document.getElementById('comboDisplay');
+        const comboContainer = document.getElementById('comboContainer');
+        const hitRating = document.getElementById('hitRating');
+        const loadingScreen = document.getElementById('loadingScreen');
+        const startScreen = document.getElementById('startScreen');
+        const connectionDot = document.getElementById('connectionDot');
+        const connectionStatus = document.getElementById('connectionStatus');
+
+        // Audio Engine
+        let dist, synth, mainGain;
+        const strings = ['E2', 'A2', 'D3', 'G3', 'B3', 'E4'];
+
+        function initAudio() {
+            mainGain = new Tone.Gain(2.0).toDestination();
+            dist = new Tone.Distortion(0.8).connect(mainGain);
+
+            const verb = new Tone.Reverb({ decay: 1.5, wet: 0.35 }).connect(dist);
+            const filter = new Tone.Filter(2500, "lowpass").connect(verb);
+
+            synth = new Tone.PolySynth(Tone.FMSynth, {
+                harmonicity: 3,
+                modulationIndex: 10,
+                oscillator: { type: 'sawtooth' },
+                envelope: {
+                    attack: 0.002,
+                    decay: 0.2,
+                    sustain: 0.2,
+                    release: 1.2
+                }
+            }).connect(filter);
+        }
+
+        async function startAudio() {
+            await Tone.start();
+            await Tone.context.resume();
+        }
+
+        function playMuted() {
+            if (!isAudioStarted) return;
+            synth.triggerAttackRelease('E1', '32n', Tone.now(), 0.3);
+        }
+
+        function playStrum(fretStates, direction) {
+            if (!isAudioStarted) return;
+            const now = Tone.now();
+            const indices = direction === 'down' ? [0, 1, 2, 3, 4, 5] : [5, 4, 3, 2, 1, 0];
+
+            indices.forEach((stringIdx, i) => {
+                const baseNote = strings[stringIdx];
+                const fret = fretStates[stringIdx] || 0;
+                const note = Tone.Frequency(baseNote).transpose(fret).toNote();
+                const strumDelay = i * 0.015;
+                synth.triggerAttackRelease(note, '1n', now + strumDelay, 0.85);
+            });
+        }
+
+        // WebRTC
+        let peer = null;
+        let conn = null;
+
+        function initWebRTC() {
+            peer = new Peer(`AIR-GUITAR-PC-${ROOM_ID}`, {
+                debug: 1,
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                }
+            });
+
+            peer.on('open', (id) => {
+                console.log('PC peer ID:', id);
+            });
+
+            peer.on('connection', (newConn) => {
+                if (conn) conn.close();
+                conn = newConn;
+                setupConnection();
+                updateConnectionStatus(true);
+            });
+
+            peer.on('error', (err) => {
+                console.error('PeerJS Error:', err);
+            });
+        }
+
+        function setupConnection() {
+            conn.on('data', (data) => {
+                if (data.type === 'FRET_UPDATE') {
+                    fretStates = data.payload;
+                }
+            });
+
+            conn.on('close', () => {
+                console.log('Mobile disconnected');
+                updateConnectionStatus(false);
+            });
+        }
+
+        function updateConnectionStatus(connected) {
+            if (connected) {
+                connectionDot.className = 'status-dot connected';
+                connectionStatus.className = 'flex items-center gap-4 text-green-400';
+                connectionStatus.querySelector('span').textContent = 'Linked';
+            } else {
+                connectionDot.className = 'status-dot connecting';
+                connectionStatus.className = 'flex items-center gap-4 text-red-500 animate-pulse';
+                connectionStatus.querySelector('span').textContent = 'Linking...';
+            }
+        }
+
+        // Initialize camera and model
+        async function init() {
+            await tf.setBackend('webgl');
+            await tf.ready();
+
+            const model = await handpose.load();
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720, frameRate: { ideal: 60 } },
+                audio: false
+            });
+
+            video.srcObject = stream;
+            video.onloadedmetadata = async () => {
+                await video.play();
+                isReady = true;
+                loadingScreen.style.display = 'none';
+                startScreen.style.display = 'flex';
+                gameLoop(model);
+            };
+        }
+
+        function spawnNote() {
+            const now = Date.now();
+            if (now - lastNoteSpawnTime > 1100) {
+                notes.push({
+                    id: nextNoteId++,
+                    x: -100,
+                    fret: [0, 3, 5, 7, 10, 12][Math.floor(Math.random() * 6)],
+                    hit: false,
+                    missed: false
+                });
+                lastNoteSpawnTime = now;
+            }
+        }
+
+        function drawHandMesh(landmarks, vScale, hScale, isStrum) {
+            ctx.save();
+            ctx.scale(-1, 1);
+            ctx.translate(-CANVAS_W, 0);
+
+            ctx.strokeStyle = isStrum ? '#fb923c' : '#0ea5e9';
+            ctx.lineWidth = 3;
+            ctx.shadowBlur = isStrum ? 30 : 5;
+            ctx.shadowColor = ctx.strokeStyle;
+
+            const fingers = [
+                [0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12],
+                [0, 13, 14, 15, 16], [0, 17, 18, 19, 20]
+            ];
+
+            fingers.forEach(finger => {
+                ctx.beginPath();
+                finger.forEach((idx, i) => {
+                    const x = landmarks[idx][0] * hScale;
+                    const y = landmarks[idx][1] * vScale;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+            });
+
+            ctx.restore();
+        }
+
+        async function gameLoop(model) {
+            canvas.width = CANVAS_W;
+            canvas.height = CANVAS_H;
+
+            // Clear background
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+            // Draw video
+            ctx.save();
+            ctx.globalAlpha = 0.25;
+            ctx.scale(-1, 1);
+            ctx.drawImage(video, -CANVAS_W, 0, CANVAS_W, CANVAS_H);
+            ctx.restore();
+
+            if (isAudioStarted) spawnNote();
+
+            // Rhythm track
+            const trackH = 140;
+            const trackY = 80;
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+            ctx.fillRect(0, trackY, CANVAS_W, trackH);
+
+            ctx.strokeStyle = combo > 5 ? '#f59e0b' : '#38bdf8';
+            ctx.lineWidth = 14;
+            ctx.beginPath();
+            ctx.moveTo(HIT_ZONE_X, trackY + 15);
+            ctx.lineTo(HIT_ZONE_X, trackY + trackH - 15);
+            ctx.stroke();
+
+            // Draw strings
+            for (let i = 0; i < 6; i++) {
+                const yOff = i * 30;
+                const active = fretStates[i] > 0;
+                ctx.strokeStyle = active ? '#fb923c' : 'rgba(255, 255, 255, 0.1)';
+                ctx.lineWidth = active ? 8 : 2;
+                ctx.beginPath();
+                ctx.moveTo(0, STRUM_ZONE.y + yOff);
+                ctx.lineTo(CANVAS_W, STRUM_ZONE.y + yOff + 140);
+                ctx.stroke();
+            }
+
+            // Hand tracking
+            const predictions = await model.estimateHands(video);
+            let didStrum = false;
+            let strumDir = 'down';
+            const now = Date.now();
+
+            if (predictions.length > 0) {
+                const hScale = CANVAS_W / video.videoWidth;
+                const vScale = CANVAS_H / video.videoHeight;
+
+                // Face filter: only hands in bottom 50%
+                const validHands = predictions.filter(p => {
+                    const wristY = p.landmarks[0][1] * vScale;
+                    return wristY > CANVAS_H * 0.45;
+                });
+
+                if (validHands.length > 0) {
+                    const hand = validHands.reduce((prev, curr) =>
+                        (prev.landmarks[0][0] < curr.landmarks[0][0]) ? prev : curr);
+
+                    const avgTipY = (hand.landmarks[8][1] + hand.landmarks[12][1] + hand.landmarks[16][1]) / 3 * vScale;
+                    const displayHandX = CANVAS_W - (hand.landmarks[0][0] * hScale);
+
+                    drawHandMesh(hand.landmarks, vScale, hScale, isStrumming);
+
+                    if (displayHandX > STRUM_ZONE.x && displayHandX < STRUM_ZONE.x + STRUM_ZONE.w &&
+                        avgTipY > STRUM_ZONE.y && avgTipY < STRUM_ZONE.y + STRUM_ZONE.h) {
+
+                        if (lastY !== null) {
+                            const vel = avgTipY - lastY;
+                            const speed = Math.abs(vel);
+
+                            const crossed = (lastY < STRUM_MID_Y && avgTipY >= STRUM_MID_Y) ||
+                                          (lastY > STRUM_MID_Y && avgTipY <= STRUM_MID_Y);
+
+                            if (crossed && speed > STRUM_VELOCITY_THRESHOLD) {
+                                if (now - lastStrumTime > 150) {
+                                    didStrum = true;
+                                    strumDir = vel > 0 ? 'down' : 'up';
+                                    lastStrumTime = now;
+                                    isStrumming = true;
+                                    for (let k = 0; k < 15; k++) {
+                                        particles.push({
+                                            x: displayHandX, y: avgTipY,
+                                            vx: (Math.random() - 0.5) * 35,
+                                            vy: (Math.random() - 0.5) * 35,
+                                            life: 1, color: '#f97316'
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        lastY = avgTipY;
+                    } else {
+                        lastY = null;
+                        isStrumming = false;
+                    }
+                }
+            }
+
+            // Notes
+            const centerY = trackY + (trackH / 2);
+            for (let i = notes.length - 1; i >= 0; i--) {
+                const note = notes[i];
+                if (!note.hit && !note.missed) {
+                    note.x += NOTE_SPEED;
+
+                    if (didStrum) {
+                        const dist = Math.abs(note.x - HIT_ZONE_X);
+                        if (dist < HIT_WINDOW) {
+                            note.hit = true;
+                            const isPerfect = dist < HIT_WINDOW / 3.5;
+                            score += (isPerfect ? 1000 : 500);
+                            combo += 1;
+                            updateScore();
+                            showRating(isPerfect ? 'PERFECT' : 'GREAT', isPerfect ? '#facc15' : '#38bdf8');
+                            playStrum(fretStates, strumDir);
+
+                            for (let j = 0; j < 25; j++) {
+                                particles.push({
+                                    x: HIT_ZONE_X, y: centerY,
+                                    vx: (Math.random() - 0.5) * 50,
+                                    vy: (Math.random() - 0.5) * 50,
+                                    life: 1, color: isPerfect ? '#fbbf24' : '#38bdf8'
+                                });
+                            }
+                        }
+                    }
+
+                    if (note.x > HIT_ZONE_X + HIT_WINDOW) {
+                        note.missed = true;
+                        combo = 0;
+                        updateScore();
+                        showRating('MISS', '#ef4444');
+                        playMuted();
+                    }
+                }
+
+                if (!note.hit) {
+                    ctx.save();
+                    ctx.globalAlpha = note.missed ? 0.2 : 1.0;
+                    ctx.fillStyle = note.missed ? '#450a0a' : '#f97316';
+                    ctx.beginPath();
+                    ctx.roundRect(note.x - 55, centerY - 45, 110, 90, 20);
+                    ctx.fill();
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '900 44px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(`F${note.fret}`, note.x, centerY + 18);
+                    ctx.restore();
+                }
+            }
+            notes = notes.filter(n => n.x < CANVAS_W + 200 && !n.hit);
+
+            // Particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.04;
+                if (p.life > 0) {
+                    ctx.save();
+                    ctx.globalAlpha = p.life;
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 8 * p.life, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }
+            }
+            particles = particles.filter(p => p.life > 0);
+
+            requestAnimationFrame(() => gameLoop(model));
+        }
+
+        function updateScore() {
+            scoreDisplay.textContent = score.toLocaleString();
+            if (combo > 0) {
+                comboDisplay.textContent = combo;
+                comboContainer.style.display = 'flex';
+            } else {
+                comboContainer.style.display = 'none';
+            }
+        }
+
+        function showRating(text, color) {
+            hitRating.textContent = text;
+            hitRating.style.color = color;
+            hitRating.style.display = 'block';
+            hitRating.className = 'hit-rating ping';
+
+            setTimeout(() => {
+                hitRating.style.display = 'none';
+                hitRating.className = 'hit-rating';
+            }, 500);
+        }
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            CANVAS_W = window.innerWidth;
+            CANVAS_H = window.innerHeight;
+        });
+
+        // Event listeners
+        document.getElementById('startBtn').addEventListener('click', async () => {
+            await startAudio();
+            isAudioStarted = true;
+            startScreen.style.display = 'none';
+        });
+
+        document.getElementById('exitBtn').addEventListener('click', () => {
+            if (conn) conn.close();
+            if (peer) peer.destroy();
+            window.location.href = '/';
+        });
+
+        // Initialize
+        initAudio();
+        initWebRTC();
+        init();
+    </script>
+</body>
+</html>

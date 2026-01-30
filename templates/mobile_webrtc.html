@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Air Guitar Pro - Mobile Controller</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #020617;
+            color: white;
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+            height: 100vh;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background-color: #0f172a;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .status-dot.connected {
+            background-color: #22c55e;
+            box-shadow: 0 0 10px rgba(34, 197, 94, 0.6);
+        }
+
+        .status-dot.connecting {
+            background-color: #ef4444;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-text {
+            font-size: 0.6rem;
+            font-weight: 900;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            opacity: 0.7;
+        }
+
+        .room-display {
+            text-align: right;
+        }
+
+        .room-label {
+            font-size: 0.5rem;
+            font-weight: 700;
+            color: #64748b;
+            text-transform: uppercase;
+        }
+
+        .room-code {
+            font-family: monospace;
+            font-size: 0.75rem;
+            font-weight: 900;
+            color: #f97316;
+        }
+
+        .exit-btn {
+            margin-left: 0.5rem;
+            padding: 0.25rem 0.75rem;
+            background-color: rgba(255, 255, 255, 0.05);
+            border-radius: 0.5rem;
+            font-size: 0.6rem;
+            font-weight: 700;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        /* Vertical fretboard layout */
+        .fretboard {
+            flex: 1;
+            display: flex;
+            position: relative;
+            background-color: #0f172a;
+        }
+
+        /* Horizontal fret lines */
+        .fret-lines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 3rem;
+            bottom: 3rem;
+            display: flex;
+            z-index: 10;
+        }
+
+        .fret-line {
+            flex: 1;
+            height: 100%;
+            border-right: 2px solid;
+            border-image: linear-gradient(to bottom, #334155, #64748b, #334155) 1;
+        }
+
+        /* Vertical strings */
+        .strings-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 3rem;
+            bottom: 3rem;
+            display: flex;
+            z-index: 5;
+        }
+
+        .string-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .string-line {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            transition: all 0.075s;
+        }
+
+        .string-line.active {
+            height: 4px;
+            background-color: #fb923c;
+            box-shadow: 0 0 15px rgba(251, 146, 60, 0.8);
+        }
+
+        .string-line.inactive {
+            height: 2px;
+            background-color: #334155;
+        }
+
+        /* Touch zones - vertical layout */
+        .touch-zones {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 3rem;
+            bottom: 3rem;
+            display: flex;
+            z-index: 20;
+        }
+
+        .string-zone {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .touch-zone {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .fret-btn {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 50%;
+            border: 2px solid;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+            transition: all 0.2s;
+        }
+
+        .fret-btn.active {
+            background-color: #f97316;
+            border-color: #fdba74;
+            color: white;
+            transform: scale(1.2);
+            box-shadow: 0 0 15px rgba(249, 115, 22, 0.5);
+            z-index: 30;
+        }
+
+        .fret-btn.inactive {
+            border-color: rgba(30, 41, 59, 0.5);
+            background-color: rgba(15, 23, 42, 0.3);
+            color: #334155;
+        }
+
+        .fret-btn.open-active {
+            background-color: #f97316;
+            border-color: #fb923c;
+            color: white;
+            transform: scale(1.1);
+            box-shadow: 0 0 10px rgba(249, 115, 22, 0.5);
+        }
+
+        .fret-btn.open-inactive {
+            border-color: #1e293b;
+            color: #1e293b;
+        }
+
+        /* String names on the right */
+        .string-names-rail {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 3rem;
+            display: flex;
+            flex-direction: column;
+            background-color: rgba(0, 0, 0, 0.4);
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 20;
+        }
+
+        .string-name {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+            color: #475569;
+            font-size: 0.65rem;
+            font-style: italic;
+        }
+
+        /* Chord shortcuts at bottom */
+        .chord-bar {
+            height: 5rem;
+            background-color: rgba(15, 23, 42, 0.8);
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 0.5rem;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.5rem;
+        }
+
+        .chord-btn {
+            border-radius: 0.75rem;
+            border: 2px solid;
+            font-weight: 900;
+            font-size: 1rem;
+            transition: all 0.2s;
+            background: none;
+            color: inherit;
+        }
+
+        .chord-btn.active {
+            background-color: #f97316;
+            border-color: #fdba74;
+            color: white;
+            box-shadow: 0 0 10px rgba(249, 115, 22, 0.2);
+        }
+
+        .chord-btn.inactive {
+            background-color: #1e293b;
+            border-color: rgba(255, 255, 255, 0.05);
+            color: #64748b;
+        }
+
+        .accent-bar {
+            background-color: #ea580c;
+            height: 3px;
+            width: 100%;
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div id="statusDot" class="status-dot connecting"></div>
+                <span id="statusText" class="status-text">LINKING...</span>
+            </div>
+            <div class="room-display">
+                <div class="room-label">PC IP</div>
+                <div id="pcIp" class="room-code">---</div>
+            </div>
+            <button id="exitBtn" class="exit-btn">EXIT</button>
+        </div>
+
+        <div class="fretboard" id="fretboard">
+            <!-- Fret lines (horizontal) -->
+            <div class="fret-lines">
+                <div class="fret-line"></div>
+                <div class="fret-line"></div>
+                <div class="fret-line"></div>
+                <div class="fret-line"></div>
+                <div class="fret-line"></div>
+            </div>
+
+            <!-- Strings (vertical) -->
+            <div class="strings-container" id="stringsContainer"></div>
+
+            <!-- Touch zones -->
+            <div class="touch-zones" id="touchZones"></div>
+
+            <!-- String names on right -->
+            <div class="string-names-rail">
+                <div class="string-name">E</div>
+                <div class="string-name">A</div>
+                <div class="string-name">D</div>
+                <div class="string-name">G</div>
+                <div class="string-name">B</div>
+                <div class="string-name">E</div>
+            </div>
+        </div>
+
+        <div class="chord-bar" id="chordContainer">
+            <button class="chord-btn inactive" data-chord="C">C</button>
+            <button class="chord-btn inactive" data-chord="G">G</button>
+            <button class="chord-btn inactive" data-chord="D">D</button>
+            <button class="chord-btn inactive" data-chord="Am">Am</button>
+        </div>
+
+        <div class="accent-bar"></div>
+    </div>
+
+    <script>
+        const STRING_NAMES = ['E', 'A', 'D', 'G', 'B', 'E'];
+        const TOTAL_FRETS = 4;
+
+        const CHORD_PATTERNS = {
+            'C': [0, 1, 0, 2, 3, 0],
+            'G': [3, 0, 0, 0, 2, 3],
+            'D': [2, 3, 2, 0, 0, 0],
+            'Am': [0, 1, 2, 2, 0, 0]
+        };
+
+        let fretStates = [0, 0, 0, 0, 0, 0];
+        let pc = null;
+        let dataChannel = null;
+
+        // Get PC IP
+        const urlParams = new URLSearchParams(window.location.search);
+        let pcIp = urlParams.get('ip') || '10.239.209.208:8081';
+        document.getElementById('pcIp').textContent = pcIp.replace(':8081', '');
+
+        function initFretboard() {
+            const stringsContainer = document.getElementById('stringsContainer');
+            const touchZones = document.getElementById('touchZones');
+
+            stringsContainer.innerHTML = '';
+            touchZones.innerHTML = '';
+
+            for (let sIdx = 0; sIdx < 6; sIdx++) {
+                // String visual
+                const stringCol = document.createElement('div');
+                stringCol.className = 'string-col';
+
+                const stringLine = document.createElement('div');
+                stringLine.className = 'string-line inactive';
+                stringLine.id = `string-${sIdx}`;
+                stringCol.appendChild(stringLine);
+                stringsContainer.appendChild(stringCol);
+
+                // Touch zones for this string
+                const stringZone = document.createElement('div');
+                stringZone.className = 'string-zone';
+
+                // Open string (top)
+                const openZone = document.createElement('div');
+                openZone.className = 'touch-zone';
+                openZone.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    handleTouch(sIdx, 0);
+                });
+                const openBtn = document.createElement('div');
+                openBtn.className = 'fret-btn open-inactive';
+                openBtn.id = `open-btn-${sIdx}`;
+                openBtn.textContent = 'O';
+                openZone.appendChild(openBtn);
+                stringZone.appendChild(openZone);
+
+                // Frets 1-4
+                for (let fIdx = 0; fIdx < TOTAL_FRETS; fIdx++) {
+                    const fretZone = document.createElement('div');
+                    fretZone.className = 'touch-zone';
+                    fretZone.addEventListener('touchstart', (e) => {
+                        e.preventDefault();
+                        handleTouch(sIdx, fIdx + 1);
+                    });
+                    const fretBtn = document.createElement('div');
+                    fretBtn.className = 'fret-btn inactive';
+                    fretBtn.id = `fret-btn-${sIdx}-${fIdx}`;
+                    fretBtn.textContent = fIdx + 1;
+                    fretZone.appendChild(fretBtn);
+                    stringZone.appendChild(fretZone);
+                }
+
+                touchZones.appendChild(stringZone);
+            }
+        }
+
+        function handleTouch(stringIdx, fret) {
+            if (navigator.vibrate) {
+                navigator.vibrate(10);
+            }
+
+            fretStates[stringIdx] = fret;
+            updateFretboard();
+            sendFretUpdate();
+        }
+
+        function updateFretboard() {
+            for (let sIdx = 0; sIdx < 6; sIdx++) {
+                const fret = fretStates[sIdx];
+                const stringLine = document.getElementById(`string-${sIdx}`);
+
+                if (fret > 0) {
+                    stringLine.className = 'string-line active';
+                } else {
+                    stringLine.className = 'string-line inactive';
+                }
+
+                const openBtn = document.getElementById(`open-btn-${sIdx}`);
+                if (fret === 0) {
+                    openBtn.className = 'fret-btn open-active';
+                } else {
+                    openBtn.className = 'fret-btn open-inactive';
+                }
+
+                for (let fIdx = 0; fIdx < TOTAL_FRETS; fIdx++) {
+                    const fretBtn = document.getElementById(`fret-btn-${sIdx}-${fIdx}`);
+                    if (fret === fIdx + 1) {
+                        fretBtn.className = 'fret-btn active';
+                    } else {
+                        fretBtn.className = 'fret-btn inactive';
+                    }
+                }
+            }
+
+            updateChordButtons();
+        }
+
+        function updateChordButtons() {
+            const chordButtons = document.querySelectorAll('.chord-btn');
+            chordButtons.forEach(btn => {
+                const chordName = btn.dataset.chord;
+                const pattern = CHORD_PATTERNS[chordName];
+                const isActive = pattern.every((v, i) => v === fretStates[i]);
+                btn.className = isActive ? 'chord-btn active' : 'chord-btn inactive';
+            });
+        }
+
+        function setChord(chordName) {
+            if (navigator.vibrate) {
+                navigator.vibrate([15, 10, 15]);
+            }
+            fretStates = [...CHORD_PATTERNS[chordName]];
+            updateFretboard();
+            sendFretUpdate();
+        }
+
+        function sendFretUpdate() {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({
+                    type: 'FRET_UPDATE',
+                    payload: fretStates
+                }));
+            }
+        }
+
+        // WebRTC
+        async function connectToPC() {
+            const serverUrl = `http://${pcIp}/offer`;
+
+            pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
+
+            dataChannel = pc.createDataChannel('fret-data');
+
+            dataChannel.onopen = () => {
+                console.log('Data channel opened');
+                updateConnectionStatus(true);
+            };
+
+            dataChannel.onclose = () => {
+                console.log('Data channel closed');
+                updateConnectionStatus(false);
+                setTimeout(connectToPC, 2000);
+            };
+
+            dataChannel.onerror = (error) => {
+                console.error('Data channel error:', error);
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                console.log('ICE state:', pc.iceConnectionState);
+                if (pc.iceConnectionState === 'disconnected') {
+                    updateConnectionStatus(false);
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            try {
+                const response = await fetch(serverUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type
+                    })
+                });
+
+                if (!response.ok) throw new Error('Failed to connect');
+
+                const answer = await response.json();
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+                console.log('Connected to PC');
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateConnectionStatus(false);
+                setTimeout(connectToPC, 3000);
+            }
+        }
+
+        function updateConnectionStatus(connected) {
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+
+            if (connected) {
+                statusDot.className = 'status-dot connected';
+                statusText.textContent = 'LINKED TO PC';
+            } else {
+                statusDot.className = 'status-dot connecting';
+                statusText.textContent = 'LINKING...';
+            }
+        }
+
+        // Event listeners
+        document.getElementById('exitBtn').addEventListener('click', () => {
+            if (dataChannel) dataChannel.close();
+            if (pc) pc.close();
+            window.location.href = '/';
+        });
+
+        document.querySelectorAll('.chord-btn').forEach(btn => {
+            btn.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                setChord(btn.dataset.chord);
+            });
+        });
+
+        // Initialize
+        initFretboard();
+        connectToPC();
+    </script>
+</body>
+</html>
